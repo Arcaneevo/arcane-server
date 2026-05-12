@@ -5,8 +5,23 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const httpServer = createServer(app);
+
+// Headers para ngrok y CORS
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', '*');
+  res.header('ngrok-skip-browser-warning', 'true');
+  next();
+});
+
 const io = new Server(httpServer, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+    credentials: false
+  },
+  allowEIO3: true,
+  transports: ['polling', 'websocket']
 });
 
 // Supabase
@@ -20,7 +35,9 @@ const pvpRooms  = new Map(); // battleId → { p1, p2, state }
 const bossRooms = new Map(); // roomId   → { players, bossState }
 
 // ===== HEALTH CHECK =====
-app.get('/', (req, res) => res.json({ status: 'ok', server: 'Arcane Rift v1.0' }));
+app.get('/', (req, res) => res.json({ status: 'ok', server: 'Arcane Rift v1.0', time: new Date().toISOString() }));
+app.get('/health', (req, res) => res.json({ ok: true }));
+app.get('/test', (req, res) => res.send('<h1>✅ Servidor Arcane Rift funcionando</h1>'));
 
 // ===== CONEXIÓN =====
 io.on('connection', (socket) => {
@@ -32,19 +49,19 @@ io.on('connection', (socket) => {
 
   // Buscar oponente por username
   socket.on('pvp:search', async ({ username, myUsername, myId, goldBet }) => {
-    const { data: target } = await supabase.from('players')
+    if (!username) return socket.emit('pvp:search_result', { error: 'Escribe un nombre' });
+    console.log(`🔍 pvp:search → username="${username}" myId="${myId}" goldBet=${goldBet}`);
+
+    const { data: target, error } = await supabase.from('players')
       .select('id, username, last_seen, pvp_status, gold')
       .eq('username', username).maybeSingle();
 
-    if (!target) return socket.emit('pvp:search_result', { error: 'Usuario no encontrado' });
+    console.log(`🔍 resultado:`, target ? `encontrado id=${target.id}` : `no encontrado`, error?.message||'');
 
-    const online = target.last_seen &&
-      (Date.now() - new Date(target.last_seen).getTime()) < 120000;
-    if (!online) return socket.emit('pvp:search_result', { error: username + ' está offline' });
-    if (target.pvp_status === 'in_battle')
-      return socket.emit('pvp:search_result', { error: username + ' está en batalla' });
-    if (target.gold < goldBet)
-      return socket.emit('pvp:search_result', { error: username + ' no tiene suficiente oro' });
+    if (!target) return socket.emit('pvp:search_result', { error: 'Usuario "' + username + '" no encontrado' });
+    if (target.id === myId) return socket.emit('pvp:search_result', { error: 'No puedes desafiarte a ti mismo' });
+    if (target.pvp_status === 'in_battle') return socket.emit('pvp:search_result', { error: username + ' está en batalla' });
+    if ((target.gold || 0) < (goldBet || 0)) return socket.emit('pvp:search_result', { error: username + ' no tiene suficiente oro (' + goldBet + ' 🪙)' });
 
     socket.emit('pvp:search_result', { ok: true, targetId: target.id, targetUsername: target.username });
   });
@@ -355,7 +372,7 @@ io.on('connection', (socket) => {
         currentTurnPlayerId: null, actionLog,
         bossTurn: true
       });
-      setTimeout(() => doBossTurn(roomId), 1200);
+      setTimeout(() => doBossTurn(roomId), 2500);
     } else {
       io.to('boss:'+roomId).emit('boss:state_update', {
         players: room.players, bossHp: room.bossHp,
@@ -508,31 +525,34 @@ function doBossTurn(roomId) {
 
   if (atk.effect === 'curse') {
     room.cursedPlayers[target.id] = 2;
-    actionLog = `💜 ¡${target.username} quedó maldito! -30HP x2 turnos`;
+    actionLog = `💜 ¡${target.username} quedó maldito! -30HP los próximos 2 turnos`;
+    // NO aplicar daño inmediato — empieza en el siguiente turno del boss
   } else if (atk.effect === 'summon') {
     if (!room.skeletonAlive) { room.skeletonAlive = true; room.skeletonHp = 30; }
     alive.forEach(p => { p.hp = Math.max(0, p.hp - atk.dmg); });
-    actionLog = '🦴 ¡Esqueleto invocado!';
+    actionLog = '🦴 ¡Esqueleto invocado! -' + atk.dmg + 'HP al equipo';
   } else if (atk.effect === 'burial') {
     room.groundTurns = 2;
     alive.forEach(p => { p.hp = Math.max(0, p.hp - atk.dmg); });
-    actionLog = '💀 ¡Entierro! Esqueletos emergen 2 rondas';
+    actionLog = '💀 ¡Entierro! -' + atk.dmg + 'HP. Esqueletos en suelo 2 rondas';
   }
 
-  // Aplicar maldiciones
+  // Aplicar maldiciones ACTIVAS (de turnos anteriores, no del actual)
   Object.keys(room.cursedPlayers).forEach(pid => {
+    // Solo aplicar si la maldición ya existía antes de este turno
+    if (atk.effect === 'curse' && room.cursedPlayers[pid] === 2) return; // recién aplicada
     if (room.cursedPlayers[pid] > 0) {
-      const cp = room.players.find(p=>p.id===pid);
-      if (cp) cp.hp = Math.max(0, cp.hp - 30);
+      const cp = room.players.find(p => p.id === pid);
+      if (cp && cp.isAlive) cp.hp = Math.max(0, cp.hp - 30);
       room.cursedPlayers[pid]--;
       if (room.cursedPlayers[pid] <= 0) delete room.cursedPlayers[pid];
     }
   });
 
-  // Daño del suelo
+  // Daño del suelo — solo si ya estaba activo ANTES de este turno
   if (room.groundTurns > 0 && atk.effect !== 'burial') {
     alive.forEach(p => { p.hp = Math.max(0, p.hp - 10); });
-    room.groundTurns--;
+    room.groundTurns = Math.max(0, room.groundTurns - 1);
   }
 
   // Verificar muertes
@@ -552,7 +572,7 @@ function doBossTurn(roomId) {
     skeletonAlive: room.skeletonAlive, skeletonHp: room.skeletonHp,
     groundTurns: room.groundTurns, cursedPlayers: room.cursedPlayers,
     currentTurnPlayerId: stillAlive[0]?.id,
-    actionLog, bossAttack: atk.id, bossTurn: false
+    actionLog, bossAttack: atk.id, bossTurn: true
   });
   startBossTimer(roomId);
 }
