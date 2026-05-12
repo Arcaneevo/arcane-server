@@ -5,23 +5,8 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const httpServer = createServer(app);
-
-// Headers para ngrok y CORS
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', '*');
-  res.header('ngrok-skip-browser-warning', 'true');
-  next();
-});
-
 const io = new Server(httpServer, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-    credentials: false
-  },
-  allowEIO3: true,
-  transports: ['polling', 'websocket']
+  cors: { origin: '*', methods: ['GET', 'POST'] }
 });
 
 // Supabase
