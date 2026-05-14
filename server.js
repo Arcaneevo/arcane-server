@@ -304,42 +304,42 @@ io.on('connection', (socket) => {
     startBossTimer(roomId);
   });
 
-  socket.on('boss:action', async ({ roomId, playerId, action, attackType, target }) => {
+  socket.on('boss:action', async ({ roomId, playerId, action, attackType, target, clientDmg, clientCrit }) => {
     const room = bossRooms.get(roomId);
     if (!room || room.status !== 'active') return;
 
     const alive = room.players.filter(p=>p.isAlive);
     const myIdx = alive.findIndex(p=>p.id===playerId);
-    if (myIdx !== room.currentTurnIndex) return; // no es su turno
+    if (myIdx !== room.currentTurnIndex) return;
 
     clearTimeout(room.timer);
     const me = alive[myIdx];
-    let actionLog = '', dmg = 0;
+    let actionLog = '', dmg = 0, crit = false;
 
     if (action === 'attack') {
       const spCost = attackType === 'kick' ? 8 : 5;
       if (me.sp < spCost) { socket.emit('boss:no_sp'); return; }
       me.sp -= spCost;
-      const crit = Math.random() < 0.15;
-      dmg = Math.max(1, (me.atk||12) + Math.floor(Math.random()*6));
-      if (crit) dmg = Math.floor(dmg*1.5);
+      // Usar daño del cliente (tiene los stats reales) o calcular si no viene
+      dmg = clientDmg || Math.max(1, (me.atk||12) + Math.floor(Math.random()*6));
+      crit = clientCrit || false;
 
       if (target === 'skeleton' && room.skeletonAlive) {
         room.skeletonHp = Math.max(0, room.skeletonHp - dmg);
         if (room.skeletonHp <= 0) room.skeletonAlive = false;
-        actionLog = `${me.username} atacó al esqueleto: -${dmg}`;
+        actionLog = `⚔ ${me.username}: -${dmg} al esqueleto${crit?' CRÍTICO':''}`;
       } else {
         room.bossHp = Math.max(0, room.bossHp - dmg);
-        actionLog = `${me.username} atacó a la Necro: -${dmg}${crit?' ¡CRÍTICO!':''}`;
+        actionLog = `⚔ ${me.username}: -${dmg} a la Necro${crit?' CRÍTICO':''}`;
       }
     } else if (action === 'heal') {
       if (me.sp < 10) { socket.emit('boss:no_sp'); return; }
       me.sp -= 10;
       const heal = Math.floor(me.maxHp * 0.2);
       me.hp = Math.min(me.maxHp, me.hp + heal);
-      actionLog = `${me.username} se curó ${heal} HP`;
+      actionLog = `💚 ${me.username} se curó ${heal}HP`;
     } else if (action === 'defend') {
-      actionLog = `${me.username} se defiende`;
+      actionLog = `🛡 ${me.username} se defiende`;
     }
 
     // Verificar victoria
